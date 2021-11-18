@@ -5,24 +5,39 @@ from ml.models import MLBackend
 
 
 class MLBackendSerializer(serializers.ModelSerializer):
-
     def validate(self, attrs):
         attrs = super(MLBackendSerializer, self).validate(attrs)
         url = attrs['url']
         if MLBackend.healthcheck_(url).is_error:
-            raise serializers.ValidationError(f'Can\'t connect to ML backend {url}. Is it valid? '
-                                              f'<a href="https://labelstud.io/guide/ml.html>Read more</a>'
-                                              f' how to set up your code as a ML backend')
+            raise serializers.ValidationError(
+                f"Can't connect to ML backend {url}, health check failed. "
+                f'Make sure it is up and your firewall is properly configured. '
+                f'<a href="https://labelstud.io/guide/ml.html>Learn more</a>'
+                f' about how to set up an ML backend.'
+            )
         project = attrs['project']
         setup_response = MLBackend.setup_(url, project)
         if setup_response.is_error:
             raise serializers.ValidationError(
-                f'Successfully connected to {url} but it doesn\'t look like a valid ML backend. '
+                f"Successfully connected to {url} but it doesn't look like a valid ML backend. "
                 f'Reason: {setup_response.error_message}.\n'
-                f'Perhaps it\'s better to check ML backend server console logs to see what\'s going on there\n'
-                f'(may be something wrong with your model or it is incompatible with current labeling configuration?)')
+                f'Check the ML backend server console logs to check the status. There might be\n'
+                f'something wrong with your model or it might be incompatible with the current labeling configuration.'
+            )
         return attrs
 
     class Meta:
         model = MLBackend
         fields = '__all__'
+
+
+class MLInteractiveAnnotatingRequest(serializers.Serializer):
+    task = serializers.IntegerField(
+        help_text='ID of task to annotate',
+        required=True,
+    )
+    context = serializers.JSONField(
+        help_text='Context for ML model',
+        allow_null=True,
+        default=None,
+    )

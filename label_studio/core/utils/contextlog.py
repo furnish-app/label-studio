@@ -85,7 +85,8 @@ class ContextLog(object):
     def _exclude_endpoint(self, request):
         if request.resolver_match and request.resolver_match.view_name in [
             'django.views.static.serve',
-            'data_import:data-upload'
+            'data_import:data-upload',
+            'version'
         ]:
             return True
         if request.GET.get('interaction', None) == 'timer':
@@ -115,6 +116,7 @@ class ContextLog(object):
 
     def create_payload(self, request, response, body):
         payload = {
+            'url': request.build_absolute_uri(),
             'server_id': self._get_server_id(),
             'server_time': self._get_timestamp_now(),
             'session_id': request.session.get('uid', None),
@@ -162,6 +164,6 @@ class ContextLog(object):
         else:
             try:
                url = 'https://tele.labelstud.io'
-               requests.post(url=url, json=payload)
+               requests.post(url=url, json=payload, timeout=3.0)
             except:
                 pass

@@ -1,5 +1,6 @@
 """This file and its contents are licensed under the Apache License 2.0. Please see the included NOTICE for copyright information and LICENSE for a copy of the license.
 """
+import json
 import logging
 import os
 import requests
@@ -7,8 +8,12 @@ import urllib
 import attr
 
 from django.db.models import Q, F, Count
+from django.conf import settings
 from requests.adapters import HTTPAdapter
 from core.version import get_git_version
+from data_export.serializers import ExportDataSerializer
+from users.models import Token
+
 
 version = get_git_version()
 logger = logging.getLogger(__name__)
@@ -53,7 +58,6 @@ class BaseHTTPAPI(object):
 
     def _prepare_kwargs(self, kwargs):
         kwargs['timeout'] = self._connection_timeout, self._timeout
-        # kwargs['timeout'] = kwargs.get('timeout', None)
 
     def request(self, method, *args, **kwargs):
         self._prepare_kwargs(kwargs)
@@ -144,13 +148,11 @@ class MLApi(BaseHTTPAPI):
         return f'{project.id}.{time_id}'
 
     def train(self, project, use_ground_truth=False):
-        from tasks.serializers import TaskWithAnnotationsSerializer
         # get only tasks with annotations
         tasks = project.tasks.annotate(num_annotations=Count('annotations')).filter(num_annotations__gt=0)
 
-        # create serialized tasks with annotations: {"data": .., "annotations": [{...}]}
-        tasks_ser = TaskWithAnnotationsSerializer(
-            tasks, many=True, context={'export_mode': True, 'aggregator_type': 'no_aggregation'}).data
+        # create serialized tasks with annotations: {"data": {...}, "annotations": [{...}], "predictions": [{...}]}
+        tasks_ser = ExportDataSerializer(tasks, many=True).data
         logger.debug(f'{len(tasks_ser)} tasks with annotations are sent to ML backend for training.')
         request = {
             'annotations': tasks_ser,
@@ -163,7 +165,7 @@ class MLApi(BaseHTTPAPI):
         }
         return self._request('train', request, verbose=False)
 
-    def make_predictions(self, tasks, model_version, project):
+    def make_predictions(self, tasks, model_version, project, context=None):
         request = {
             'tasks': tasks,
             'model_version': model_version,
@@ -171,8 +173,9 @@ class MLApi(BaseHTTPAPI):
             'label_config': project.label_config,
             'params': {
                 'login': project.task_data_login,
-                'password': project.task_data_password
-            }
+                'password': project.task_data_password,
+                'context': context,
+            },
         }
         return self._request('predict', request, verbose=False)
 
@@ -185,7 +188,9 @@ class MLApi(BaseHTTPAPI):
     def setup(self, project):
         return self._request('setup', request={
             'project': self._create_project_uid(project),
-            'schema': project.label_config
+            'schema': project.label_config,
+            'hostname': settings.HOSTNAME if settings.HOSTNAME else ('http://localhost:' + settings.INTERNAL_PORT),
+            'access_token': project.created_by.auth_token.key
         })
 
     def duplicate_model(self, project_src, project_dst):

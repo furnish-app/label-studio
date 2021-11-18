@@ -13,15 +13,46 @@ from copy import deepcopy
 from django.conf import settings
 from projects.models import Project
 from tasks.models import Task
-from tests.utils import make_project
 from users.models import User
 from organizations.models import Organization
 from types import SimpleNamespace
 
-from .utils import create_business, signin, gcs_client_mock, ml_backend_mock, register_ml_backend_mock, azure_client_mock
+# if we haven't this package, pytest.ini::env doesn't work
+try:
+    import pytest_env.plugin
+except ImportError:
+    print('\n\n !!! Please, pip install pytest-env \n\n')
+    exit(-100)
 
+from .utils import (
+    create_business, signin, gcs_client_mock, ml_backend_mock, register_ml_backend_mock, azure_client_mock,
+    redis_client_mock, make_project
+)
 
 boto3.set_stream_logger('botocore.credentials', logging.DEBUG)
+
+
+@pytest.fixture(autouse=False)
+def enable_csrf():
+    settings.USE_ENFORCE_CSRF_CHECKS = True
+
+
+@pytest.fixture(autouse=True)
+def disable_sentry():
+    settings.SENTRY_RATE = 0
+    settings.SENTRY_DSN = None
+
+
+@pytest.fixture()
+def debug_modal_exceptions_false(settings):
+    settings.DEBUG_MODAL_EXCEPTIONS = False
+
+
+@pytest.fixture(scope="function")
+def enable_sentry():
+    settings.SENTRY_RATE = 0
+    # it's disabled key, but this is correct
+    settings.SENTRY_DSN = 'https://44f7a50de5ab425ca6bc406ef69b2122@o227124.ingest.sentry.io/5820521'
 
 
 @pytest.fixture(scope='function')
@@ -59,20 +90,33 @@ def s3_with_images(s3):
     s3.put_object(Bucket=bucket_name, Key='image1.jpg', Body='123')
     s3.put_object(Bucket=bucket_name, Key='subdir/image1.jpg', Body='456')
     s3.put_object(Bucket=bucket_name, Key='subdir/image2.jpg', Body='789')
+    s3.put_object(Bucket=bucket_name, Key='subdir/another/image2.jpg', Body='0ab')
     yield s3
 
 
 @pytest.fixture(autouse=True)
 def s3_with_jsons(s3):
-    """
-    Bucket structure:
-    s3://pytest-s3-images/image1.jpg
-    s3://pytest-s3-images/subdir/image1.jpg
-    s3://pytest-s3-images/subdir/image2.jpg
-    """
     bucket_name = 'pytest-s3-jsons'
     s3.create_bucket(Bucket=bucket_name)
     s3.put_object(Bucket=bucket_name, Key='test.json', Body=json.dumps({'image_url': 'http://ggg.com/image.jpg'}))
+    yield s3
+
+
+@pytest.fixture(autouse=True)
+def s3_with_hypertext_s3_links(s3):
+    bucket_name = 'pytest-s3-jsons-hypertext'
+    s3.create_bucket(Bucket=bucket_name)
+    s3.put_object(Bucket=bucket_name, Key='test.json', Body=json.dumps({
+        'text': "<a href=\"s3://hypertext-bucket/file with /spaces and' / ' / quotes.jpg\"/>"
+    }))
+    yield s3
+
+
+@pytest.fixture(autouse=True)
+def s3_with_unexisted_links(s3):
+    bucket_name = 'pytest-s3-jsons-unexisted_links'
+    s3.create_bucket(Bucket=bucket_name)
+    s3.put_object(Bucket=bucket_name, Key='some-existed-image.jpg', Body='qwerty')
     yield s3
 
 
@@ -92,6 +136,12 @@ def gcs_client():
 @pytest.fixture(autouse=True)
 def azure_client():
     with azure_client_mock():
+        yield
+
+
+@pytest.fixture(autouse=True)
+def redis_client():
+    with redis_client_mock():
         yield
 
 
@@ -191,10 +241,11 @@ def setup_project(client, project_template, do_auth=True):
     # we work in empty database, so let's create business user and login
     user = User.objects.create(email=email)
     user.set_password(password)  # set password without hash
-    user.save()
 
     create_business(user)
     org = Organization.create_organization(created_by=user, title=user.first_name)
+    user.active_organization = org
+    user.save()
 
     if do_auth:
 
@@ -260,7 +311,8 @@ def business_client(client):
     client.user = user
     client.organization = org
 
-    assert signin(client, email, password).status_code == 302
+    if signin(client, email, password).status_code != 302:
+        print(f'User {user} failed to login!')
     return client
 
 
@@ -275,7 +327,8 @@ def annotator_client(client):
     user.save()
     business = create_business(user)
     Organization.create_organization(created_by=user, title=user.first_name)
-    assert signin(client, email, password).status_code == 302
+    if signin(client, email, password).status_code != 302:
+        print(f'User {user} failed to login!')
     client.user = user
     client.annotator = user
     return client
@@ -292,7 +345,8 @@ def annotator2_client(client):
     user.save()
     business = create_business(user)
     Organization.create_organization(created_by=user, title=user.first_name)
-    assert signin(client, email, password).status_code == 302
+    if signin(client, email, password).status_code != 302:
+        print(f'User {user} failed to login!')
     client.user = user
     client.annotator = user
     return client
@@ -333,3 +387,8 @@ def configured_project(business_client, annotator_client):
 
     Task.objects.bulk_create([Task(data=task, project=project) for task in _2_tasks_with_textA_and_textB])
     return project
+
+
+@pytest.fixture(name="django_live_url")
+def get_server_url(live_server):
+    yield live_server.url

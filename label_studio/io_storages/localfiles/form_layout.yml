@@ -5,12 +5,12 @@ title_bucket_prefix: &title_bucket_prefix
     label: Storage Title
   - type: text
     name: path
-    label: Local path
+    label: Absolute local path
     required: true
 
 ImportStorage:
   # Title, Bucket, Prefix
-  - columnCount: 3
+  - columnCount: 2
     fields: *title_bucket_prefix
   # Regex filter
   - columnCount: 1
@@ -19,6 +19,8 @@ ImportStorage:
         name: regex_filter
         label: File Filter Regex
         placeholder: '.*csv or .*(jpe?g|png|tiff) or .\w+-\d+.text'
+        validators:
+          - regexp
 
   # 2 columns grid
   - columnCount: 2

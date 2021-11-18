@@ -91,6 +91,11 @@ class RedisImportStorage(ImportStorage, RedisStorageMixin):
     def scan_and_create_links(self):
         return self._scan_and_create_links(RedisImportStorageLink)
 
+    def validate_connection(self, client=None):
+        if client is None:
+            client = self.get_client()
+        client.ping()
+
 
 class RedisExportStorage(ExportStorage, RedisStorageMixin):
     db = models.PositiveSmallIntegerField(
@@ -100,11 +105,16 @@ class RedisExportStorage(ExportStorage, RedisStorageMixin):
     def save_annotation(self, annotation):
         client = self.get_client()
         logger.debug(f'Creating new object on {self.__class__.__name__} Storage {self} for annotation {annotation}')
-        ser_annotation = StorageAnnotationSerializer(annotation).data
-        with transaction.atomic():
-            # Create export storage link
-            link = RedisExportStorageLink.create(annotation, self)
-            client.set(link.key, json.dumps(ser_annotation))
+        ser_annotation = self._get_serialized_data(annotation)
+
+        # get key that identifies this object in storage
+        key = RedisExportStorageLink.get_key(annotation)
+
+        # put object into storage
+        client.set(key, json.dumps(ser_annotation))
+
+        # create link if everything ok
+        RedisExportStorageLink.create(annotation, self)
 
 
 @receiver(post_save, sender=Annotation)

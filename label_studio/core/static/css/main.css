@@ -38,7 +38,7 @@ table th {
     font-size: 1em;
 }
 table td {
-    font-weight: lighter;
+
 }
 
 .label, .value {
@@ -622,11 +622,6 @@ hotkey i {
 
 .ui.toggle.checkbox input:checked~.box:before, .ui.toggle.checkbox input:checked~label:before {
     background-color: rgb(24, 144, 255)!important;
-}
-
-/* ant + semantic bugfix */
-span.anticon {
-    padding-top: 3px !important;
 }
 
 .small-breadcrumb {

@@ -14,6 +14,8 @@ from rest_framework.authtoken.models import Token
 
 from organizations.models import OrganizationMember, Organization
 from users.functions import hash_upload
+from core.utils.common import load_func
+from projects.models import Project
 
 YEAR_START = 1980
 YEAR_CHOICES = []
@@ -70,14 +72,17 @@ class UserLastActivityMixin(models.Model):
         abstract = True
 
 
-class User(AbstractBaseUser, PermissionsMixin, UserLastActivityMixin):
+UserMixin = load_func(settings.USER_MIXIN)
+
+
+class User(UserMixin, AbstractBaseUser, PermissionsMixin, UserLastActivityMixin):
     """
     An abstract base class implementing a fully featured User model with
     admin-compliant permissions.
 
     Username and password are required. Other fields are optional.
     """
-    username = models.CharField(_('username'), max_length=256, blank=True)
+    username = models.CharField(_('username'), max_length=256)
     email = models.EmailField(_('email address'), unique=True, blank=True)
 
     first_name = models.CharField(_('first name'), max_length=256, blank=True)
@@ -108,14 +113,31 @@ class User(AbstractBaseUser, PermissionsMixin, UserLastActivityMixin):
         db_table = 'htx_user'
         verbose_name = _('user')
         verbose_name_plural = _('users')
+        indexes = [
+            models.Index(fields=['username']),
+            models.Index(fields=['email']),
+            models.Index(fields=['first_name']),
+            models.Index(fields=['last_name']),
+            models.Index(fields=['date_joined']),
+        ]
 
     @property
     def avatar_url(self):
         if self.avatar:
-            return settings.HOSTNAME + self.avatar.url
+            if settings.DEFAULT_FILE_STORAGE == 'storages.backends.s3boto3.S3Boto3Storage':
+                return self.avatar.url
+            else:
+                return settings.HOSTNAME + self.avatar.url
 
     def is_organization_admin(self, org_pk):
         return True
+
+    def active_organization_annotations(self):
+        return self.annotations.filter(task__project__organization=self.active_organization)
+
+    def active_organization_contributed_project_number(self):
+        annotations = self.active_organization_annotations()
+        return annotations.values_list('task__project').distinct().count()
 
     @property
     def own_organization(self):
@@ -124,9 +146,6 @@ class User(AbstractBaseUser, PermissionsMixin, UserLastActivityMixin):
     @property
     def has_organization(self):
         return Organization.objects.filter(created_by=self).exists()
-
-    def is_annotator(self, organization_pk):
-        return False
 
     def clean(self):
         super().clean()

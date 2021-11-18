@@ -1,15 +1,13 @@
 """This file and its contents are licensed under the Apache License 2.0. Please see the included NOTICE for copyright information and LICENSE for a copy of the license.
 """
 from django.shortcuts import render
-from rules.contrib.views import permission_required
-from core.permissions import view_with_auth, IsBusiness
-
-from .models import Organization
+from django.contrib.auth.decorators import login_required
 
 
-@view_with_auth(['GET'], (IsBusiness,))
-@permission_required('organizations.change_organization', fn=Organization.from_request, raise_exception=True)
+@login_required
 def organization_people_list(request):
-    return render(request, 'organizations/people_list.html', {
-        'user': request.user,
-    })
+    return render(request, 'organizations/people_list.html')
+
+@login_required
+def simple_view(request):
+    return render(request, 'organizations/people_list.html')

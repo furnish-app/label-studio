@@ -118,9 +118,7 @@ def test_next_task(
     r = any_client.get(f'/api/projects/{project.id}/next')
     assert r.status_code == status_code
     rdata = json.loads(r.content)
-    if r.status_code == 404:
-        assert rdata['detail'].startswith('There are no tasks remaining to be annotated')
-    else:
+    if r.status_code != 404:
         for response_key, expected_value_set in expected_response_value_set.items():
             if expected_value_set == 'uncompleted_task_ids':
                 expected_value_set = uncompleted_task_ids
@@ -437,7 +435,7 @@ def test_next_task_with_active_learning(mocker,
                                         status_code, prelabeling_result
                                         ):
 
-    project = make_project(project_config, business_client.user)
+    project = make_project(project_config, business_client.user, use_ml_backend=False)
     if _client_is_annotator(any_client):
         invite_client_to_project(any_client, project)
     if _client_is_annotator(annotator2_client):
@@ -460,13 +458,10 @@ def test_next_task_with_active_learning(mocker,
     rdata = json.loads(r.content)
     if r.status_code == 200:
         assert rdata['predictions'][0]['result'] == prelabeling_result
-    elif r.status_code == 404:
-        assert rdata['detail'].startswith('There are no tasks remaining to be annotated')
 
 
-@pytest.mark.parametrize('duplicated_project', (True, False))
 @pytest.mark.django_db
-def test_active_learning_with_uploaded_predictions(business_client, duplicated_project):
+def test_active_learning_with_uploaded_predictions(business_client):
     config = dict(
         title='Test',
         is_published=True,
@@ -481,11 +476,6 @@ def test_active_learning_with_uploaded_predictions(business_client, duplicated_p
             </View>'''
     )
     project = make_project(config, business_client.user, use_ml_backend=False)
-    if duplicated_project:
-        r = business_client.get(f'/api/projects/{project.id}/duplicate', {'duplicate_tasks': 0, 'title': 'duplicated'})
-        project = Project.objects.get(id=json.loads(r.content)['id'])
-        project.is_published = True
-        project.save()
     result = [{
         'from_name': 'text_class',
         'to_name': 'text',

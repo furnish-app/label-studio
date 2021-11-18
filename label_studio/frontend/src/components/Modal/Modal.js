@@ -2,6 +2,7 @@ import React, { createRef } from "react";
 import { render, unmountComponentAtNode } from "react-dom";
 import { ApiProvider } from "../../providers/ApiProvider";
 import { ConfigProvider } from "../../providers/ConfigProvider";
+import { CurrentUserProvider } from "../../providers/CurrentUser";
 import { MultiProvider } from "../../providers/MultiProvider";
 import { cn } from "../../utils/bem";
 import { Button } from "../Button/Button";
@@ -19,10 +20,12 @@ const standaloneModal = (props) => {
   const renderModal = (props, animate) => {
     renderCount++;
 
+    // simple modals don't require any parts of the app and can't cause the loop of death
     render((
-      <MultiProvider key={`modal-${renderCount}`} providers={[
+      <MultiProvider key={`modal-${renderCount}`} providers={props.simple ? [] : [
         <ConfigProvider key="config"/>,
         <ApiProvider key="api"/>,
+        <CurrentUserProvider key="current-user"/>,
       ]}>
         <Modal
           ref={modalRef}
@@ -45,7 +48,10 @@ const standaloneModal = (props) => {
       renderModal({...props, ...(newProps ?? {}), visible: true}, false);
     },
     close() {
-      modalRef.current.hide();
+      const result = modalRef.current.hide();
+      unmountComponentAtNode(rootDiv);
+      rootDiv.remove();
+      return result;
     },
   };
 };

@@ -39,8 +39,14 @@ class OrganizationMember(models.Model):
     def is_owner(self):
         return self.user.id == self.organization.created_by.id
 
+    class Meta:
+        ordering = ['pk']
 
-class Organization(models.Model):
+
+OrganizationMixin = load_func(settings.ORGANIZATION_MIXIN)
+
+
+class Organization(OrganizationMixin, models.Model):
     """
     """
     title = models.CharField(_('organization title'), max_length=1000, null=False)
@@ -54,6 +60,9 @@ class Organization(models.Model):
 
     created_at = models.DateTimeField(_('created at'), auto_now_add=True)
     updated_at = models.DateTimeField(_('updated at'), auto_now=True)
+
+    def __str__(self):
+        return self.title + ', id=' + str(self.pk)
 
     @classmethod
     def from_request(cls, request):
@@ -88,6 +97,11 @@ class Organization(models.Model):
 
     def has_project_member(self, user):
         return self.projects.filter(members__user=user).exists()
+
+    def has_permission(self, user):
+        if self in user.organizations.all():
+            return True
+        return False
 
     def add_user(self, user):
         if self.users.filter(pk=user.pk).exists():

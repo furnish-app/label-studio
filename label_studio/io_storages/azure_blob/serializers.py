@@ -10,10 +10,17 @@ from io_storages.azure_blob.models import AzureBlobImportStorage, AzureBlobExpor
 
 class AzureBlobImportStorageSerializer(ImportStorageSerializer):
     type = serializers.ReadOnlyField(default='azure')
+    presign = serializers.BooleanField(required=False, default=True)
 
     class Meta:
         model = AzureBlobImportStorage
         fields = '__all__'
+
+    def to_representation(self, instance):
+        result = super().to_representation(instance)
+        result.pop('account_name')
+        result.pop('account_key')
+        return result
 
     def validate(self, data):
         data = super(AzureBlobImportStorageSerializer, self).validate(data)
@@ -27,6 +34,12 @@ class AzureBlobImportStorageSerializer(ImportStorageSerializer):
 
 class AzureBlobExportStorageSerializer(ExportStorageSerializer):
     type = serializers.ReadOnlyField(default='azure')
+
+    def to_representation(self, instance):
+        result = super().to_representation(instance)
+        result.pop('account_name')
+        result.pop('account_key')
+        return result
 
     class Meta:
         model = AzureBlobExportStorage

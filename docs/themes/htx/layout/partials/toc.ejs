@@ -1,4 +1,5 @@
 <ul class="menu-root">
+    <li style="margin-top: 45px;"><h3 class="root"><%- type %></h3></li>
 
   <% site.pages.find({ type: type }).sort('order').each(function (p) { %>
     <% var fileName = p.path.replace(/^.+?\/([\w-]+)\.html/, '$1') %>
@@ -6,20 +7,29 @@
 
 
 <% if (type === 'guide') { %>
-      <% if (fileName === 'index') { %>
-          <li><h4>Get Started</h4></li>
-      <% } %>
       <% if (fileName === 'install') { %>
           <li><h4>Install and Upgrade</h4></li>
+      <% } %>
+      <% if (fileName === 'security') { %>
+          <li><h4>Security and Privacy</h4></li>
+      <% } %>
+      <% if (fileName === 'signup') { %>
+          <li><h4>Manage Users</h4></li>
       <% } %>
       <% if (fileName === 'tasks') { %>
           <li><h4>Import Data</h4></li>
       <% } %>
-       <% if (fileName === 'setup') { %>
-          <li><h4>Manage Data & Projects</h4></li>
+       <% if (fileName === 'setup_project') { %>
+          <li><h4>Labeling and Projects</h4></li>
+      <% } %>
+      <% if (fileName === 'quality') { %>
+          <li><h4>Manage Annotations</h4></li>
       <% } %>
       <% if (fileName === 'ml') { %>
           <li><h4>Machine Learning Setup</h4></li>
+      <% } %>
+      <% if (fileName === 'webhooks') { %>
+          <li><h4>Integrations</h4></li>
       <% } %>
       <% if (fileName === 'frontend') { %>
           <li><h4>Advanced Development</h4></li>
@@ -38,7 +48,7 @@
           <li><h4>Control Tags</h4></li>
       <% } %>
 
-      <% if (fileName === 'header') { %>
+      <% if (fileName === 'filter') { %>
           <li><h4>Visual & Experience Tags</h4></li>
       <% } %>
 
@@ -54,8 +64,7 @@
       <% } %>
     <li>
       <a href="<%- url_for(p.path) %>" class="sidebar-link<%- page.title === p.title ? ' current' : '' %><%- p.is_new ? ' new' : '' %>">
-        <%- removeLabelStudioMention(p.title) %>
-      </a>
+        <%- p.short ? p.short: p.title %></a>&nbsp;<%- (p.badge) %>
     </li>
     <% }) %>
 </ul>

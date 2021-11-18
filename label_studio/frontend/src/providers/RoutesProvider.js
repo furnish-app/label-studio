@@ -30,17 +30,9 @@ const findMacthingComponents = (path, routesMap, parentPath = "") => {
   return result;
 };
 
-// const logRoutes = (routes, parentPath = "") => {
-//   routes?.forEach?.(({routes, ...route}) => {
-//     const fullPath = `${parentPath}${route.path}`;
-//     console.log({...route, path: fullPath});
-//     logRoutes(routes, fullPath);
-//   });
-// };
-
 export const RoutesProvider = ({children}) => {
   const history = useHistory();
-  const location = useLocation();
+  const location = useFixedLocation();
   const config = useConfig();
   const {store} = useAppStore();
   const breadcrumbs = useBreadcrumbControls();
@@ -67,6 +59,7 @@ export const RoutesProvider = ({children}) => {
     currentContext,
     setContextProps: setCurrentContextProps,
     path: currentPath,
+    findComponent: (path) => findMacthingComponents(path, routesMap),
   }), [
     breadcrumbs,
     routesMap,
@@ -76,7 +69,6 @@ export const RoutesProvider = ({children}) => {
   ]);
 
   useEffect(() => {
-    console.log("Location changed");
     const ContextComponent = lastRoute?.context;
 
     setCurrentContext({
@@ -97,7 +89,6 @@ export const RoutesProvider = ({children}) => {
       }).filter(c => !!c.title);
 
       setBreadcrumbs(crumbs);
-      console.log(crumbs);
     } catch (err) {
       console.log(err);
     }
@@ -114,6 +105,10 @@ export const useRoutesMap = () => {
   return useContext(RoutesContext)?.routesMap ?? [];
 };
 
+export const useFindRouteComponent = () => {
+  return useContext(RoutesContext)?.findComponent ?? (() => null);
+};
+
 export const useBreadcrumbs = () => {
   return useContext(RoutesContext)?.breadcrumbs ?? [];
 };
@@ -123,14 +118,26 @@ export const useCurrentPath = () => {
 };
 
 export const useParams = () => {
-  const location = useLocation();
+  const location = useFixedLocation();
   const currentPath = useCurrentPath();
 
   const match = useMemo(() => {
-    return matchPath(location.pathname, currentPath ?? "");
+    const parsedLocation = location.search
+      .replace(/^\?/, '')
+      .split("&")
+      .map(pair => {
+        const [key, value] = pair.split('=').map(p => decodeURIComponent(p));
+        return [key, value];
+      });
+
+    const search = Object.fromEntries(parsedLocation);
+
+    const urlParams = matchPath(location.pathname, currentPath ?? "");
+
+    return {...search, ...(urlParams?.params ?? {})};
   }, [location, currentPath]);
 
-  return match?.params ?? {};
+  return match ?? {};
 };
 
 export const useContextComponent = () => {
@@ -141,6 +148,18 @@ export const useContextComponent = () => {
   } = ctx?.currentContext ?? {};
 
   return { ContextComponent, contextProps };
+};
+
+export const useFixedLocation = () => {
+  const location = useLocation();
+
+  location
+
+  const result = useMemo(() => {
+    return location.location ?? location;
+  }, [location]);
+
+  return result;
 };
 
 export const useContextProps = () => {

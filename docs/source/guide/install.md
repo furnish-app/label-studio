@@ -3,29 +3,18 @@ title: Install and upgrade Label Studio
 type: guide
 order: 200
 meta_title: Install and Upgrade
-meta_description: Label Studio Documentation for installing and upgrading Label Studio with Docker, pip, and anaconda to use for your machine learning and data science projects. 
+meta_description: Label Studio documentation for installing and upgrading Label Studio with Docker, pip, and anaconda to use for your machine learning and data science projects. 
 ---
 
-Install Label Studio on premises or in the cloud. Choose the install method that works best for your environment:
+Install Label Studio on premises or in the cloud. Choose the installation method that works best for your environment:
 - [Install with pip](#Install-with-pip)
 - [Install with Docker](#Install-with-Docker)
+- [Install on Ubuntu](#Install-on-Ubuntu)
 - [Install from source](#Install-from-source)
 - [Install with Anaconda](#Install-with-Anaconda)
-- [Install for local development](#Install-for-local-development)
 - [Upgrade Label Studio](#Upgrade-Label-Studio)
 
-
-## System requirements
-You can install Label Studio on a Linux, Windows, or MacOSX machine running Python 3.6 or later. 
-
-### Install prerequisite
-Install Label Studio in a clean Python environment. We highly recommend using a virtual environment (venv or conda) to reduce the likelihood of package conflicts or missing packages. 
-
-### Port requirements
-Label Studio expects port 8080 to be open by default. To use a different port, specify it when starting Label Studio. See [Start Label Studio](start.html). 
-
-### Disk space requirements
-Allocate disk space according to the amount of data you plan to label. As a benchmark, 1 million labeling tasks take up approximately 2.3GB on disk when using the SQLite database. For more on using Label Studio at scale and labeling performance, see [Start Label Studio](start.html). 
+<!-- md deploy.md -->
 
 ### Web browser support
 Label Studio is tested with the latest version of Google Chrome and is expected to work in the latest versions of:
@@ -35,21 +24,28 @@ Label Studio is tested with the latest version of Google Chrome and is expected 
 
 If using other web browsers, or older versions of supported web browsers, unexpected behavior could occur. 
 
+## Install prerequisite
+Install Label Studio in a clean Python environment. We highly recommend using a virtual environment (venv or conda) to reduce the likelihood of package conflicts or missing packages.
 
 ## Install with pip
 
-To install Label Studio using pip, you need Python>=3.6 and run:
+To install Label Studio with pip and a virtual environment, you need Python version 3.6 or later. Run the following:
+```bash
+python3 -m venv env
+source env/bin/activate
+python -m pip install label-studio
+```
+
+To install Label Studio with pip, you need Python version 3.6 or later. Run the following:
 ```bash
 pip install label-studio
 ```
 
-Then, start Label Studio:
-
+After you install Label Studio, start the server with the following command: 
 ```bash
 label-studio
 ```
-The default web browser opens automatically at [http://localhost:8080](http://localhost:8080) with Label Studio.
-
+The default web browser opens automatically at [http://localhost:8080](http://localhost:8080) with Label Studio. See [start Label Studio](start.html) for more options when starting Label Studio.
 
 ## Install with Docker
 
@@ -78,7 +74,7 @@ docker build -t heartexlabs/label-studio:latest .
 ```
 
 ### Run with Docker Compose
-Use Docker Compose to serve Label Studio at `http://localhost:8080`.
+Use Docker Compose to serve Label Studio at `http://localhost:8080`. You must use Docker Compose version 1.25.0 or higher.
 
 Start Label Studio:
 ```bash
@@ -87,6 +83,17 @@ docker-compose up -d
 
 This starts Label Studio with a PostgreSQL database backend. You can also use a PostgreSQL database without Docker Compose. See [Set up database storage](storedata.html).
 
+## Install on Ubuntu
+
+To install Label Studio on Ubuntu and run it in a virtual environment, run the following command:
+
+```bash
+python3 -m venv env
+source env/bin/activate
+sudo apt install python3.9-dev
+python -m pip install label-studio
+```
+
 ## Install from source
 
 If you want to use nightly builds or extend the functionality, consider downloading the source code using Git and running Label Studio locally:
@@ -94,16 +101,13 @@ If you want to use nightly builds or extend the functionality, consider download
 ```bash
 git clone https://github.com/heartexlabs/label-studio.git
 cd label-studio
-python setup.py develop
+# Install all package dependencies
+pip install -e .
+# Run database migrations
+python label_studio/manage.py migrate
+# Start the server in development mode at http://localhost:8080
+python label_studio/manage.py runserver
 ```
-
-Then, start Label Studio:
-
-```bash
-label-studio 
-```
-The default web browser opens automatically at [http://localhost:8080](http://localhost:8080).
-
 
 ## Install with Anaconda
 

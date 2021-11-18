@@ -9,7 +9,6 @@ import copy
 import logging
 import hashlib
 import requests
-import socket
 import random
 import calendar
 import uuid
@@ -20,24 +19,23 @@ import traceback as tb
 import drf_yasg.openapi as openapi
 import contextlib
 import label_studio
+import re
 
 from django.db import models, transaction
-from django.template import loader
-from django.http import HttpResponse
-from django.utils.timezone import now
-from django.utils.crypto import get_random_string
 from django.utils.module_loading import import_string
 from django.core.paginator import Paginator
 from django.core.validators import URLValidator
 from django.core.exceptions import ValidationError
 from django.conf import settings
 from django.db.utils import OperationalError
-
+from django.db.models.signals import *
 from rest_framework.views import Response, exception_handler
 from rest_framework import status
 from rest_framework.exceptions import ErrorDetail
+from django_filters.rest_framework import DjangoFilterBackend
+from drf_yasg.inspectors import CoreAPICompatInspector, NotHandled
+from collections import defaultdict
 
-from lxml import objectify
 from base64 import b64encode
 from lockfile import LockFile
 from datetime import datetime
@@ -118,130 +116,12 @@ def custom_exception_handler(exc, context):
         exc_tb = tb.format_exc()
         logger.debug(exc_tb)
         response_data['detail'] = str(exc)
+        if not settings.DEBUG_MODAL_EXCEPTIONS:
+            exc_tb = 'Tracebacks disabled in settings'
         response_data['exc_info'] = exc_tb
         response = Response(status=status.HTTP_500_INTERNAL_SERVER_ERROR, data=response_data)
 
     return response
-
-
-def directory_index(path, disk_path, prefix):
-    c = {}
-    t = loader.select_template(['log_files.html'])
-    files = []
-
-    for f in disk_path.iterdir():
-        if not f.name.startswith('.'):
-            url = str(f.relative_to(disk_path))
-            if f.is_dir():
-                url += '/'
-            files.append(url)
-
-    c.update({
-        'prefix': prefix + path,
-        'files': sorted(files)
-    })
-    return HttpResponse(t.render(c))
-
-
-def iter_config_templates():
-    templates_dir = os.path.join(os.path.dirname(__file__), '..', 'examples')
-    for d in os.listdir(templates_dir):
-        # check xml config file exists
-        path = os.path.join(templates_dir, d, 'config.xml')
-        if not os.path.exists(path):
-            continue
-        yield path
-
-
-def get_config_templates():
-    """ Get label config templates from directory (as usual 'examples' directory)
-    """
-    from collections import defaultdict, OrderedDict
-    templates = defaultdict(lambda: defaultdict(list))
-
-    for i, path in enumerate(iter_config_templates()):
-        # open and check xml
-        code = open(path).read()
-        try:
-            objectify.fromstring(code)
-        except Exception as e:
-            logger.error("Can't parse XML for label config template from " + path + ':' + str(e))
-            continue
-
-        # extract fields from xml and pass them to template
-        try:
-            json_string = code.split('<!--')[1].split('-->')[0]
-            meta = json.loads(json_string)
-        except Exception as e:
-            logger.error("Can't parse meta info from label config: " + str(e))
-            continue
-
-        meta['pk'] = i
-        meta['label_config'] = '-->\n'.join(code.split('-->\n')[1:])  # remove all comments at the beginning of code
-
-        meta['category'] = meta['category'] if 'category' in meta else 'no category'
-        meta['complexity'] = meta['complexity'] if 'complexity' in meta else 'no complexity'
-        templates[meta['complexity']][meta['category']].append(meta)
-
-    # sort by title
-    ordering = {
-        'basic': ['audio', 'image', 'text', 'html', 'time-series'],
-        'advanced': ['layouts', 'nested', 'per-region', 'other', 'time-series']
-    }
-    ordered_templates = OrderedDict()
-    for complexity in ['basic', 'advanced']:
-        ordered_templates[complexity] = OrderedDict()
-        # add the rest from categories not presented in manual ordering
-        x, y = ordering[complexity], templates[complexity].keys()
-        ordering[complexity] = x + list((set(x) | set(y)) - set(x))
-        for category in ordering[complexity]:
-            sort = sorted(templates[complexity][category], key=lambda z: z.get('order', None) or z['title'])
-            ordered_templates[complexity][category] = sort
-
-    return ordered_templates
-
-
-class SimpleProfiler:
-    def __init__(self):
-        self.times = [('start', 0, time.time())]
-
-    def checkpoint(self, name):
-        self.times += [(name, time.time() - self.times[-1][2], time.time())]
-
-    def print(self):
-        logger.info('\n\n\n--- Simple Profiler ---')
-        for t in self.times:
-            logger.info('%0.4f' % t[1], t[0])
-        logger.info('\n\n\n')
-
-
-def upload_uuid_filename(instance, filename):
-    """Upload filename with convention name
-
-    Convention is to use name of class plus uuid of object, width and
-    height. UUID is used to fix a privacy issue with private objects.
-
-    """
-    __, filename_ext = os.path.splitext(filename)
-    parent = getattr(instance.group, instance.PARENT_ATTR)
-
-    return '%s_%s_%d_%d%s' % (
-        instance.PARENT_ATTR,
-        parent.uuid,
-        instance.width,
-        instance.height,
-        filename_ext.lower()
-    )
-
-
-def upload_random_filename(instance, filename):
-    __, filename_ext = os.path.splitext(filename)
-
-    return '%s_%s%s' % (
-        get_random_string(),
-        now().strftime("%Y%m%d%H%M%S"),
-        filename_ext.lower(),
-    )
 
 
 def create_hash():
@@ -249,57 +129,6 @@ def create_hash():
     h = hashlib.sha1()
     h.update(str(time.time()).encode('utf-8'))
     return h.hexdigest()[0:16]
-
-
-def strfdelta(tdelta):
-    hours, rem = divmod(tdelta.seconds, 3600)
-    minutes, seconds = divmod(rem, 60)
-
-    out = ''
-    if tdelta.days > 0:
-        out += str(tdelta.days) + (' days ' if tdelta.days > 1 else ' day ')
-
-    if hours > 0:
-        out += str(hours) + (' hours ' if hours > 1 else ' hour ')
-
-    if minutes > 0:
-        out += str(minutes) + ' min '
-
-    if seconds > 0:
-        out += str(seconds) + ' sec '
-
-    return out
-
-
-def remove_protocol_name(url):
-    """ Remove http, https from url
-    """
-    return url.replace('http://', '').replace('https://', '').replace('ftp://', '')
-
-
-def pretty_date(t):
-    # check version is datetime
-    is_timestamp = True
-    if isinstance(t, datetime):
-        t = str(int(t.timestamp()))
-
-    # check if version is correct timestamp from string
-    else:
-        try:
-            int(t)
-        except (ValueError, TypeError):
-            is_timestamp = False
-        else:
-            if datetime.fromtimestamp(int(t)) < datetime(1990, 1, 1):
-                is_timestamp = False
-
-    # pretty format if timestamp else print version as is
-    if is_timestamp:
-        timestamp = int(t)
-        dt = datetime.fromtimestamp(timestamp)
-        return dt.strftime(f'%d %b %Y %H:%M:%S.{str(t)[-3:]}')
-    else:
-        return t
 
 
 def paginator(objects, request, default_page=1, default_size=50):
@@ -368,38 +197,6 @@ def string_is_url(url):
         return True
 
 
-def download_base64_uri(url, username, password):
-    try:
-        if username is not None and password is not None:
-            r = requests.get(url, auth=HTTPBasicAuth(username, password))
-        else:
-            r = requests.get(url)
-        r.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        logger.error(f'Failed downloading {url}. Reason: {e}', exc_info=True)
-    else:
-        encoded_uri = b64encode(r.content).decode('utf-8')
-        return f'data:{r.headers["Content-Type"]};base64,{encoded_uri}'
-
-
-def download_base64_uri_with_cache(url, username=None, password=None):
-    cache_dir = user_cache_dir()
-    if not os.path.exists(cache_dir):
-        os.makedirs(cache_dir)
-    filename = hashlib.md5(url.encode()).hexdigest()
-    filepath = os.path.join(cache_dir, filename)
-    if os.path.exists(filepath):
-        with io.open(filepath) as f:
-            return f.read()
-    else:
-        uri = download_base64_uri(url, username, password)
-        if uri:
-            with LockFile(filepath):
-                with io.open(filepath, mode='w') as fout:
-                    fout.write(uri)
-            return uri
-
-
 def safe_float(v, default=0):
     if v != v:
         return default
@@ -418,11 +215,12 @@ def sample_query(q, sample_size):
 def get_project(obj):
     from projects.models import Project, ProjectSummary
     from tasks.models import Task, Annotation, AnnotationDraft
+    from io_storages.base_models import ImportStorage
     from data_manager.models import View
 
     if isinstance(obj, Project):
         return obj
-    elif isinstance(obj, (Task, ProjectSummary, View)):
+    elif isinstance(obj, (Task, ProjectSummary, View, ImportStorage)):
         return obj.project
     elif isinstance(obj, (Annotation, AnnotationDraft)):
         return obj.task.project
@@ -480,8 +278,20 @@ def find_first_one_to_one_related_field_by_prefix(instance, prefix):
     for field in instance._meta.get_fields():
         if issubclass(type(field), models.fields.related.OneToOneRel):
             attr_name = field.get_accessor_name()
-            if attr_name.startswith(prefix) and hasattr(instance, attr_name):
+            if re.match(prefix, attr_name) and hasattr(instance, attr_name):
                 return getattr(instance, attr_name)
+
+
+def find_first_many_to_one_related_field_by_prefix(instance, prefix):
+    '''Hard way to check if project has at least one storage'''
+
+    for field in instance._meta.get_fields():
+        if issubclass(type(field), models.fields.related.ManyToOneRel):
+            attr_name = field.get_accessor_name()
+            if re.match(prefix, attr_name) and hasattr(instance, attr_name):
+                related_instance = getattr(instance, attr_name).first()
+                if related_instance:
+                    return related_instance
 
 
 def start_browser(ls_url, no_browser):
@@ -492,7 +302,7 @@ def start_browser(ls_url, no_browser):
 
     browser_url = ls_url
     threading.Timer(2.5, lambda: webbrowser.open(browser_url)).start()
-    print('Start browser at URL: ' + browser_url)
+    logger.info('Start browser at URL: ' + browser_url)
 
 
 @contextlib.contextmanager
@@ -557,6 +367,9 @@ def current_version_is_outdated(latest_version):
 def check_for_the_latest_version(print_message):
     """ Check latest pypi version
     """
+    if not settings.LATEST_VERSION_CHECK:
+        return
+
     import label_studio
 
     # prevent excess checks by time intervals
@@ -599,12 +412,18 @@ def collect_versions(force=False):
     :return: dict with sub-dicts of version descriptions
     """
     import label_studio
-    if settings.VERSIONS and not force:
+    
+    # prevent excess checks by time intervals
+    current_time = time.time()
+    need_check = current_time - settings.VERSIONS_CHECK_TIME > 300
+    settings.VERSIONS_CHECK_TIME = current_time
+
+    if settings.VERSIONS and not force and not need_check:
         return settings.VERSIONS
 
     # main pypi package
     result = {
-        'package': {
+        'label-studio-os-package': {
             'version': label_studio.__version__,
             'short_version': '.'.join(label_studio.__version__.split('.')[:2]),
             'latest_version_from_pypi': label_studio.__latest_version__,
@@ -612,28 +431,55 @@ def collect_versions(force=False):
             'current_version_is_outdated': label_studio.__current_version_is_outdated__
         },
         # backend full git info
-        'backend': version.get_git_commit_info()
+        'label-studio-os-backend': version.get_git_commit_info(),
+        'release': label_studio.__version__
     }
 
     # label studio frontend
     try:
-        lsf = json.load(open(os.path.join(settings.EDITOR_ROOT, 'version.json')))
+        with open(os.path.join(settings.EDITOR_ROOT, 'version.json')) as f:
+            lsf = json.load(f)
         result['label-studio-frontend'] = lsf
     except:
         pass
 
     # data manager
     try:
-        dm = json.load(open(os.path.join(settings.DM_ROOT, 'version.json')))
+        with open(os.path.join(settings.DM_ROOT, 'version.json')) as f:
+            dm = json.load(f)
         result['dm2'] = dm
     except:
         pass
 
+    # converter
     try:
         import label_studio_converter
         result['label-studio-converter'] = {'version': label_studio_converter.__version__}
-    except:
+    except Exception as e:
         pass
+
+    # ml
+    try:
+        import label_studio_ml
+        result['label-studio-ml'] = {'version': label_studio_ml.__version__}
+    except Exception as e:
+        pass
+
+    result.update(settings.COLLECT_VERSIONS(result=result))
+
+    for key in result:
+        if 'message' in result[key] and len(result[key]['message']) > 70:
+            result[key]['message'] = result[key]['message'][0:70] + ' ...'
+
+    if settings.SENTRY_DSN:
+        import sentry_sdk
+        sentry_sdk.set_context("versions", copy.deepcopy(result))
+
+        for package in result:
+            if 'version' in result[package]:
+                sentry_sdk.set_tag('version-' + package, result[package]['version'])
+            if 'commit' in result[package]:
+                sentry_sdk.set_tag('commit-' + package, result[package]['commit'])
 
     settings.VERSIONS = result
     return result
@@ -681,7 +527,13 @@ get_object_with_check_and_log = load_func(settings.GET_OBJECT_WITH_CHECK_AND_LOG
 
 
 class temporary_disconnect_signal:
-    """ Temporarily disconnect a model from a signal """
+    """ Temporarily disconnect a model from a signal
+
+        Example:
+            with temporary_disconnect_all_signals(
+                signals.post_delete, update_is_labeled_after_removing_annotation, Annotation):
+                do_something()
+    """
     def __init__(self, signal, receiver, sender, dispatch_uid=None):
         self.signal = signal
         self.receiver = receiver
@@ -701,3 +553,60 @@ class temporary_disconnect_signal:
             sender=self.sender,
             dispatch_uid=self.dispatch_uid
         )
+
+
+class temporary_disconnect_all_signals(object):
+    def __init__(self, disabled_signals=None):
+        self.stashed_signals = defaultdict(list)
+        self.disabled_signals = disabled_signals or [
+            pre_init, post_init,
+            pre_save, post_save,
+            pre_delete, post_delete,
+            pre_migrate, post_migrate,
+        ]
+
+    def __enter__(self):
+        for signal in self.disabled_signals:
+            self.disconnect(signal)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for signal in list(self.stashed_signals):
+            self.reconnect(signal)
+
+    def disconnect(self, signal):
+        self.stashed_signals[signal] = signal.receivers
+        signal.receivers = []
+
+    def reconnect(self, signal):
+        signal.receivers = self.stashed_signals.get(signal, [])
+        del self.stashed_signals[signal]
+
+
+class DjangoFilterDescriptionInspector(CoreAPICompatInspector):
+    def get_filter_parameters(self, filter_backend):
+        if isinstance(filter_backend, DjangoFilterBackend):
+            result = super(DjangoFilterDescriptionInspector, self).get_filter_parameters(filter_backend)
+            for param in result:
+                if not param.get('description', ''):
+                    param.description = "Filter the returned list by {field_name}".format(field_name=param.name)
+
+            return result
+
+        return NotHandled
+
+
+def batch(iterable, n=1):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx : min(ndx + n, l)]
+
+
+def round_floats(o):
+    if isinstance(o, float):
+        return round(o, 2)
+    if isinstance(o, dict):
+        return {k: round_floats(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [round_floats(x) for x in o]
+    return o
+

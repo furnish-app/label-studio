@@ -1,9 +1,9 @@
 ---
-title: Set up database storage
+title: Database setup 
 type: guide
-order: 204
-meta_title: Database Storage
-meta_description: Label Studio Documentation for configuring database storage for data labeling and machine learning projects.
+order: 205
+meta_title: Database Storage Setup
+meta_description: Configure the database storage used by Label Studio in your data labeling and machine learning projects to ensure performant and scalable data and configuration storage.
 ---
 Label Studio uses a database to store project data and configuration information.
 
@@ -25,7 +25,7 @@ You can also store your tasks and completions in a [PostgreSQL database](https:/
 Run the following command to launch Label Studio, configure the connection to your PostgreSQL database, scan for existing tasks, and load them into the app for labeling for a specific project.
 
 ```bash
-label-studio start my_project --init --db postgresql 
+label-studio start my_project --init -db postgresql 
 ```
 
 You must set the following environment variables to connect Label Studio to PostgreSQL:

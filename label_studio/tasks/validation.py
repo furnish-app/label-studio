@@ -6,6 +6,7 @@ import ujson as json
 from urllib.parse import urlparse
 from django.conf import settings
 from rest_framework.exceptions import ValidationError
+from core.label_config import replace_task_data_undefined_with_config_field
 
 
 class SkipField(Exception):
@@ -16,8 +17,8 @@ _DATA_TYPES = {
     'Text': [str, int, float],
     'Header': [str, int, float],
     'HyperText': [str],
-    'Image': [str],
-    'Paragraphs': [list],
+    'Image': [str, list],
+    'Paragraphs': [list, str],
     'Table': [dict],
     'TimeSeries': [dict, list, str],
     'TimeSeriesChannel': [dict, list, str]
@@ -41,11 +42,7 @@ class TaskValidator:
         if data is None:
             raise ValidationError('Task is empty (None)')
 
-        # assign undefined key name from data to the first key from config, e.g. for txt loading
-        if settings.DATA_UNDEFINED_NAME in data and project.data_types.keys():
-            key = list(project.data_types.keys())[0]
-            data[key] = data[settings.DATA_UNDEFINED_NAME]
-            del data[settings.DATA_UNDEFINED_NAME]
+        replace_task_data_undefined_with_config_field(data, project)
 
         # iterate over data types from project
         for data_key, data_type in project.data_types.items():
@@ -54,11 +51,11 @@ class TaskValidator:
 
             expected_types = _DATA_TYPES.get(data_type, (str, ))
             if not isinstance(data[data_key], tuple(expected_types)):
-                raise ValidationError('data["{data_key}"]={data_value} '
-                                      'is of type "{type}", '
-                                      'but types "{expected_types}" are expected'
+                raise ValidationError('data[\'{data_key}\']={data_value} is of type \'{type}\', '
+                                      "but the object tag {data_type} expects the following types: {expected_types}"
                                       .format(data_key=data_key, data_value=data[data_key],
-                                              type=type(data[data_key]), expected_types=expected_types))
+                                              type=type(data[data_key]).__name__, data_type=data_type,
+                                              expected_types=[e.__name__ for e in expected_types]))
 
             if data_type == 'List':
                 for item in data[data_key]:
@@ -149,10 +146,6 @@ class TaskValidator:
                 ok = 'result' in prediction
                 if not ok:
                     raise ValidationError('Prediction must have "result" fields')
-
-                # check result is list
-                if not isinstance(prediction.get('result', []), list):
-                    raise ValidationError('"result" field in prediction must be list')
 
             # task[meta]
             self.raise_if_wrong_class(task, 'meta', (dict, list))

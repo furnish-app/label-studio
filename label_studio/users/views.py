@@ -3,7 +3,6 @@
 import logging
 
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth import views as auth_views
 from django.shortcuts import render, redirect, reverse
 from django.contrib import auth
 from django.conf import settings
@@ -11,30 +10,14 @@ from django.core.exceptions import PermissionDenied
 from rest_framework.authtoken.models import Token
 
 from users import forms
-from core.permissions import view_with_auth, IsBusiness
+from core.utils.common import load_func
+from core.middleware import enforce_csrf_checks
 from users.functions import proceed_registration
 from organizations.models import Organization
 from organizations.forms import OrganizationSignupForm
 
 
 logger = logging.getLogger()
-
-
-class FPasswordResetView(auth_views.PasswordResetView):
-    from_email = 'info@labelstud.io'
-    template_name = 'password/password_reset_form.html'
-
-
-class FPasswordResetDoneView(auth_views.PasswordResetDoneView):
-    template_name = 'password/password_reset_done.html'
-
-
-class FPasswordResetConfirmView(auth_views.PasswordResetConfirmView):
-    template_name = 'password/password_reset_confirm.html'
-
-
-class FPasswordResetCompleteView(auth_views.PasswordResetCompleteView):
-    template_name = 'password/password_reset_complete.html'
 
 
 @login_required
@@ -48,6 +31,7 @@ def logout(request):
     return redirect('/')
 
 
+@enforce_csrf_checks
 def user_signup(request):
     """ Sign up page
     """
@@ -84,19 +68,21 @@ def user_signup(request):
     })
 
 
+@enforce_csrf_checks
 def user_login(request):
     """ Login page
     """
     user = request.user
     next_page = request.GET.get('next')
     next_page = next_page if next_page else reverse('projects:project-index')
-    form = forms.LoginForm()
+    login_form = load_func(settings.USER_LOGIN_FORM)
+    form = login_form()
 
     if user.is_authenticated:
         return redirect(next_page)
 
     if request.method == 'POST':
-        form = forms.LoginForm(request.POST)
+        form = login_form(request.POST)
         if form.is_valid():
             user = form.cleaned_data['user']
             auth.login(request, user, backend='django.contrib.auth.backends.ModelBackend')
@@ -113,7 +99,7 @@ def user_login(request):
     })
 
 
-@view_with_auth(['GET', 'POST'], (IsBusiness,))
+@login_required
 def user_account(request):
     user = request.user
 

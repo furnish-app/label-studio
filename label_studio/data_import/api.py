@@ -4,290 +4,205 @@ import time
 import logging
 import drf_yasg.openapi as openapi
 import json
+import mimetypes
 
+from django.conf import settings
 from django.db import transaction
 from drf_yasg.utils import swagger_auto_schema
+from django.utils.decorators import method_decorator
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from rest_framework.permissions import IsAuthenticated
+from ranged_fileresponse import RangedFileResponse
 
-from core.permissions import IsBusiness, get_object_with_permissions
-from core.utils.common import bool_from_request, conditional_atomic, retry_database_locked
+from core.permissions import all_permissions, ViewClassPermission
+from core.utils.common import retry_database_locked
+from core.utils.params import list_of_strings_from_request, bool_from_request
+from core.utils.exceptions import LabelStudioValidationErrorSentryIgnored
 from projects.models import Project
-from tasks.models import Task
+from tasks.models import Task, Prediction
 from .uploader import load_tasks
-from .serializers import ImportApiSerializer, FileUploadSerializer
+from .serializers import ImportApiSerializer, FileUploadSerializer, PredictionSerializer
 from .models import FileUpload
+
+from webhooks.utils import emit_webhooks_for_instance
+from webhooks.models import WebhookAction
 
 logger = logging.getLogger(__name__)
 
 
 task_create_response_scheme = {
-    201: openapi.Schema(
-        title='Task creation response',
-        description='Task creation response',
-        type=openapi.TYPE_OBJECT,
-        properies={
-            'task_count': openapi.Schema(
-                title='task count',
-                description='Number of tasks added',
-                type=openapi.TYPE_INTEGER
-            ),
-            'annotation_count': openapi.Schema(
-                title='annotation count',
-                description='Number of annotations added',
-                type=openapi.TYPE_INTEGER
-            ),
-            'predictions_count': openapi.Schema(
-                title='predictions count',
-                description='Number of predictions added',
-                type=openapi.TYPE_INTEGER
-            ),
-            'duration': openapi.Schema(
-                title='duration',
-                description='Time in seconds to create',
-                type=openapi.TYPE_NUMBER
-            ),
-            'file_upload_ids': openapi.Schema(
-                title='file_upload_ids',
-                description='Database IDs of uploaded files',
-                type=openapi.TYPE_ARRAY,
-                items=openapi.Schema(title="File Upload IDs", type=openapi.TYPE_INTEGER)
-            ),
-            'could_be_tasks_list': openapi.Schema(
-                title='could_be_tasks_list',
-                description='Whether uploaded files can contain lists of tasks, like CSV/TSV files',
-                type=openapi.TYPE_BOOLEAN
-            )
-        },
-        example={
-            'task_count': 50,
-            'annotation_count': 200,
-            'predictions_count': 100,
-            'duration': 3.5,
-            'file_upload_ids': [1, 2, 3]
-        }
+    201: openapi.Response(
+        description='Tasks successfully imported',
+        schema=openapi.Schema(
+            title='Task creation response',
+            description='Task creation response',
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'task_count': openapi.Schema(
+                    title='task_count',
+                    description='Number of tasks added',
+                    type=openapi.TYPE_INTEGER
+                ),
+                'annotation_count': openapi.Schema(
+                    title='annotation_count',
+                    description='Number of annotations added',
+                    type=openapi.TYPE_INTEGER
+                ),
+                'predictions_count': openapi.Schema(
+                    title='predictions_count',
+                    description='Number of predictions added',
+                    type=openapi.TYPE_INTEGER
+                ),
+                'duration': openapi.Schema(
+                    title='duration',
+                    description='Time in seconds to create',
+                    type=openapi.TYPE_NUMBER
+                ),
+                'file_upload_ids': openapi.Schema(
+                    title='file_upload_ids',
+                    description='Database IDs of uploaded files',
+                    type=openapi.TYPE_ARRAY,
+                    items=openapi.Schema(title="File Upload IDs", type=openapi.TYPE_INTEGER)
+                ),
+                'could_be_tasks_list': openapi.Schema(
+                    title='could_be_tasks_list',
+                    description='Whether uploaded files can contain lists of tasks, like CSV/TSV files',
+                    type=openapi.TYPE_BOOLEAN
+                ),
+                'found_formats': openapi.Schema(
+                    title='found_formats',
+                    description='The list of found file formats',
+                    type=openapi.TYPE_ARRAY,
+                    items=openapi.Schema(title="File format", type=openapi.TYPE_STRING)
+                ),
+                'data_columns': openapi.Schema(
+                    title='data_columns',
+                    description='The list of found data columns',
+                    type=openapi.TYPE_ARRAY,
+                    items=openapi.Schema(title="Data column name", type=openapi.TYPE_STRING)
+                )
+            })
     ),
-    400: openapi.Schema(title='Incorrect task data', type=openapi.TYPE_ARRAY,
-                        items=openapi.Schema(title="String with error description", type=openapi.TYPE_STRING))
+    400: openapi.Schema(
+        title='Incorrect task data',
+        description="String with error description",
+        type=openapi.TYPE_STRING
+    )
 }
 
 
+@method_decorator(name='post', decorator=swagger_auto_schema(
+        tags=['Import'],
+        responses=task_create_response_scheme,
+        operation_summary='Import tasks',
+        operation_description="""
+            Import data as labeling tasks in bulk using this API endpoint. You can use this API endpoint to import multiple tasks. 
+            One POST request is limited at 250K tasks and 200 MB.
+            
+            **Note:** Imported data is verified against a project *label_config* and must
+            include all variables that were used in the *label_config*. For example,
+            if the label configuration has a *$text* variable, then each item in a data object
+            must include a "text" field.
+            <br>
+            
+            ## POST requests
+            <hr style="opacity:0.3">
+            
+            There are three possible ways to import tasks with this endpoint:
+            
+            ### 1\. **POST with data**
+            Send JSON tasks as POST data. Only JSON is supported for POSTing files directly.
+            Update this example to specify your authorization token and Label Studio instance host, then run the following from
+            the command line.
+
+            ```bash
+            curl -H 'Content-Type: application/json' -H 'Authorization: Token abc123' \\
+            -X POST '{host}/api/projects/1/import' --data '[{{"text": "Some text 1"}}, {{"text": "Some text 2"}}]'
+            ```
+            
+            ### 2\. **POST with files**
+            Send tasks as files. You can attach multiple files with different names.
+            
+            - **JSON**: text files in JavaScript object notation format
+            - **CSV**: text files with tables in Comma Separated Values format
+            - **TSV**: text files with tables in Tab Separated Value format
+            - **TXT**: simple text files are similar to CSV with one column and no header, supported for projects with one source only
+            
+            Update this example to specify your authorization token, Label Studio instance host, and file name and path,
+            then run the following from the command line:
+
+            ```bash
+            curl -H 'Authorization: Token abc123' \\
+            -X POST '{host}/api/projects/1/import' -F ‘file=@path/to/my_file.csv’
+            ```
+            
+            ### 3\. **POST with URL**
+            You can also provide a URL to a file with labeling tasks. Supported file formats are the same as in option 2.
+            
+            ```bash
+            curl -H 'Authorization: Token abc123' \\
+            -X POST '{host}/api/projects/1/import' \\
+            --data '[{{"url": "http://example.com/test1.csv"}}, {{"url": "http://example.com/test2.csv"}}]'
+            ```
+            
+            <br>
+        """.format(host=(settings.HOSTNAME or 'https://localhost:8080'))
+    ))
 # Import
 class ImportAPI(generics.CreateAPIView):
-    """post:
-    Import tasks
-
-    Importing data as labeling tasks in bulk using this API endpoint works the same as using the Import button on the 
-    Data Manager page. You can use this API endpoint for importing multiple tasks. One POST request is limited at 250K tasks and 200 MB.
-
-    **Note:** Imported data is verified against a project *label_config* and must
-    include all variables that were used in the *label_config*. For example,
-    if the label configuration has a *$text* variable, then each item in a data object
-    must include a "text" field.
-
-
-    <br>
-
-    ## POST requests
-
-    <hr style="opacity:0.3">
-
-    There are three possible ways to import tasks with this endpoint:
-
-    1\. **POST with data**: Send JSON tasks as POST data. Only JSON is supported for POSTing files directly.
-
-    ```bash
-    curl -H 'Content-Type: application/json' -H 'Authorization: Token abc123' \\
-    -X POST 'https://app.heartex.ai/api/projects/1/tasks/bulk/' --data '[{"text": "Some text 1"}, {"text": "Some text 2"}]'
-    ```
-
-     2\. **POST with files**: Send tasks as files. You can attach multiple files with different names. 
-
-
-    - **JSON**: text files in javascript object notation format
-    - **CSV**: text files with tables in Comma Separated Values format
-    - **TSV**: text files with tables in Tab Separated Value format
-    - **TXT**: simple text files are similar to CSV with one column and no header, supported for projects with one source only
-    - **ZIP / RAR** with one or multiple files inside from the list below, e.g.: "zip archive.zip *.json"
-
-    ```bash
-    curl -H 'Content-Type: application/json' -H 'Authorization: Token abc123' \\
-    -X POST 'https://app.heartex.ai/api/projects/1/tasks/bulk/' --data @my_file.csv
-    ```
-
-    3\. **POST with URL**: You can also provide a URL to a file with labeling tasks. Supported file formats are the same as in option 2.
-
-    ```bash
-    curl -H 'Content-Type: application/json' -H 'Authorization: Token abc123' \\
-    -X POST 'https://app.heartex.ai/api/projects/1/tasks/bulk/' \\
-    --data '[{"url": "http://example.com/test1.csv"}, {"url": "http://example.com/test2.csv"}]'
-    ```
-
-
-    <br>
-
-    ## Import annotations: import already-labeled tasks and ground truths
-
-    <hr style="opacity:0.3">
-
-    1\. You can import already-labeled tasks and mark them as ground truths:
-    **combine task data with annotations**.
-
-    - The annotation is a JSON dict
-    - You can find descriptions of all annotation fields in the request body schema below,
-    - We recommend specifying only the "result" field.
-    - Empty annotation example:
-          { "ground_truth": true, "result": [] }
-    - Empty task and annotation example:
-          {
-            "data": {"image": "https://app.heartex.ai/static/samples/kittens2.jpg"},
-            "annotations": [{"ground_truth": true, "result": [] }]
-          }
-    - More complex examples are below.
-
-    2\. "result"
-
-    - A JSON array that depends on the labeling configuration for a project. Each array item contains a labeled region
-    (single bounding box, a segment of audio, part of the text).
-    - To quickly get the result format, open your Project -> Data Manager -> Click the pencil icon for a specific
-    task and create a new annotation. Click the "Result" button in the top right corner to get the result in JSON format.
-
-    3\. "ground_truth" (optional)
-
-    - It's **true by default**.
-    - To import existing labels as regular annotations, then set "ground_truth": false.
-
-
-    <br>
-
-    ## Import predictions: pre-labeling, statistics and machine learning
-
-    <hr style="opacity:0.3">
-
-    1\. Predictions are very similar to annotations in structure, so **learn about annotations first**.
-    You can use predictions in the labeling workflow as pre-labels, for Active Learning to evaluate Machine Learning 
-    statistics and more.
-
-    - You can find descriptions of all of the prediction fields in the request body scheme below.
-    - We recommend specifying only the "result", "model_version" and "score" fields.
-    - Empty task and prediction example:
-          {
-            "data": {"image": "https://app.heartex.ai/static/samples/kittens2.jpg"},
-            "prediction": [{"model_version": "version 1", "score": 1.0, "result": [] }]
-          }
-
-    2\. "result"
-
-    - The same as "result" in annotations.
-
-    3\. "model_version"
-
-    - Must be a string with text.
-
-    <br>
-
-    ## Examples
-
-    <hr style="opacity:0.3">
-
-    - my_file.json (with 2 tasks)
-    ```json
-    [{ "text": "Some text 1", "image": "https://app.heartex.ai/static/samples/kittens1.jpg" },
-     { "text": "Some text 2", "image": "https://app.heartex.ai/static/samples/kittens2.jpg" }]
-    ```
-
-    - my_file.csv (with 2 tasks)
-    ```csv
-    text,image
-    Some text 1,https://app.heartex.ai/static/samples/kittens1.jpg
-    Some text 2,https://app.heartex.ai/static/samples/kittens2.jpg
-    ```
-
-
-    - task_with_annotation.json (image classification project)
-    ```
-    [{
-        "data": {
-            "image": "https://app.heartex.ai/static/samples/kittens.jpg"
-        },
-        "annotations": [{
-            "ground_truth": true,
-
-            "result": [{
-                "id": "1",
-                "from_name": "my_image_class",
-                "to_name": "my_image",
-                "type": "choices",
-                "value": {
-                    "choices": [
-                        "Dog"
-                    ]
-                }
-            }]
-        }]
-    }]
-
-    - task_with_prediction.json (image classification project)
-    ```
-    [{
-        "data": {
-            "image": "https://app.heartex.ai/static/samples/kittens.jpg"
-        },
-        "predictions": [{
-            "model_version": "version_1",
-            "score": 1.0,
-
-            "result": [{
-                "id": "1",
-                "from_name": "my_image_class",
-                "to_name": "my_image",
-                "type": "choices",
-                "value": {
-                    "choices": [
-                        "Cat"
-                    ]
-                }
-            }]
-        }]
-    }]
-    ```
-
-    <br/>
-
-    """
-
+    permission_required = all_permissions.projects_change
     parser_classes = (JSONParser, MultiPartParser, FormParser)
-    permission_classes = (IsBusiness, )
     serializer_class = ImportApiSerializer
     queryset = Task.objects.all()
 
     def get_serializer_context(self):
         project_id = self.kwargs.get('pk')
         if project_id:
-            project = get_object_with_permissions(self.request, Project, project_id, 'projects.change_project')
+            project = generics.get_object_or_404(Project.objects.for_user(self.request.user), pk=project_id)
         else:
             project = None
         return {'project': project, 'user': self.request.user}
 
-    @swagger_auto_schema(tags=['Import'], responses=task_create_response_scheme)
     def post(self, *args, **kwargs):
         return super(ImportAPI, self).post(*args, **kwargs)
 
     def _save(self, tasks):
         serializer = self.get_serializer(data=tasks, many=True)
         serializer.is_valid(raise_exception=True)
-        return serializer.save(project_id=self.kwargs['pk']), serializer
+        task_instances = serializer.save(project_id=self.kwargs['pk'])
+        project = generics.get_object_or_404(Project.objects.for_user(self.request.user), pk=self.kwargs['pk'])
+        emit_webhooks_for_instance(self.request.user.active_organization, project, WebhookAction.TASKS_CREATED, task_instances)
+        return task_instances, serializer
+
+    def _reformat_predictions(self, tasks, preannotated_from_fields):
+        new_tasks = []
+        for task in tasks:
+            if 'data' in task:
+                task = task['data']
+            predictions = [{'result': task.pop(field)} for field in preannotated_from_fields]
+            new_tasks.append({
+                'data': task,
+                'predictions': predictions
+            })
+        return new_tasks
 
     def create(self, request, *args, **kwargs):
         start = time.time()
         commit_to_project = bool_from_request(request.query_params, 'commit_to_project', True)
+        return_task_ids = bool_from_request(request.query_params, 'return_task_ids', False)
+        preannotated_from_fields = list_of_strings_from_request(request.query_params, 'preannotated_from_fields', None)
 
         # check project permissions
-        project = get_object_with_permissions(self.request, Project, self.kwargs['pk'], 'projects.change_project')
+        project = generics.get_object_or_404(Project.objects.for_user(self.request.user), pk=self.kwargs['pk'])
 
         # upload files from request, and parse all tasks
         parsed_data, file_upload_ids, could_be_tasks_lists, found_formats, data_columns = load_tasks(request, project)
+
+        if preannotated_from_fields:
+            # turn flat task JSONs {"column1": value, "column2": value} into {"data": {"column1"..}, "predictions": [{..."column2"}]  # noqa
+            parsed_data = self._reformat_predictions(parsed_data, preannotated_from_fields)
 
         if commit_to_project:
             # Immediately create project tasks and update project states and counters
@@ -316,7 +231,7 @@ class ImportAPI(generics.CreateAPIView):
 
         duration = time.time() - start
 
-        return Response({
+        response = {
             'task_count': task_count,
             'annotation_count': annotation_count,
             'prediction_count': prediction_count,
@@ -325,7 +240,41 @@ class ImportAPI(generics.CreateAPIView):
             'could_be_tasks_list': could_be_tasks_lists,
             'found_formats': found_formats,
             'data_columns': data_columns
-        }, status=status.HTTP_201_CREATED)
+        }
+        if return_task_ids:
+            response['task_ids'] = [task.id for task in tasks]
+
+        return Response(response, status=status.HTTP_201_CREATED)
+
+
+# Import
+class ImportPredictionsAPI(generics.CreateAPIView):
+    permission_required = all_permissions.projects_change
+    parser_classes = (JSONParser, MultiPartParser, FormParser)
+    serializer_class = PredictionSerializer
+    queryset = Project.objects.all()
+    swagger_schema = None  # TODO: create API schema
+
+    def create(self, request, *args, **kwargs):
+        # check project permissions
+        project = self.get_object()
+        tasks_ids = set(Task.objects.filter(project=project).values_list('id', flat=True))
+        logger.debug(f'Importing {len(self.request.data)} predictions to project {project} with {len(tasks_ids)} tasks')
+        predictions = []
+        for item in self.request.data:
+            if item.get('task') not in tasks_ids:
+                raise LabelStudioValidationErrorSentryIgnored(
+                    f'{item} contains invalid "task" field: corresponding task ID couldn\'t be retrieved '
+                    f'from project {project} tasks')
+            predictions.append(Prediction(
+                task_id=item['task'],
+                result=Prediction.prepare_prediction_result(item.get('result'), project),
+                score=item.get('score'),
+                model_version=item.get('model_version', 'undefined')
+            ))
+        predictions_obj = Prediction.objects.bulk_create(predictions, batch_size=settings.BATCH_SIZE)
+
+        return Response({'created': len(predictions_obj)}, status=status.HTTP_201_CREATED)
 
 
 class TasksBulkCreateAPI(ImportAPI):
@@ -334,19 +283,28 @@ class TasksBulkCreateAPI(ImportAPI):
 
 
 class ReImportAPI(ImportAPI):
-    """post:
-    Re-import tasks
+    permission_required = all_permissions.projects_change
 
-    Re-import tasks using the specified file upload IDs for a specific project.
-    """
     @retry_database_locked()
     def create(self, request, *args, **kwargs):
         start = time.time()
         files_as_tasks_list = bool_from_request(request.data, 'files_as_tasks_list', True)
+        file_upload_ids = self.request.data.get('file_upload_ids')
 
         # check project permissions
-        project = get_object_with_permissions(self.request, Project, self.kwargs['pk'], 'projects.change_project')
-        file_upload_ids = self.request.data.get('file_upload_ids')
+        project = generics.get_object_or_404(Project.objects.for_user(self.request.user), pk=self.kwargs['pk'])
+        
+        if not file_upload_ids:
+            return Response({
+                'task_count': 0,
+                'annotation_count': 0,
+                'prediction_count': 0,
+                'duration': 0,
+                'file_upload_ids': [],
+                'found_formats': {},
+                'data_columns': []
+            }, status=status.HTTP_204_NO_CONTENT)
+
         tasks, found_formats, data_columns = FileUpload.load_tasks_from_uploaded_files(
             project, file_upload_ids,  files_as_tasks_list=files_as_tasks_list)
 
@@ -379,33 +337,44 @@ class ReImportAPI(ImportAPI):
             'data_columns': data_columns
         }, status=status.HTTP_201_CREATED)
 
-    @swagger_auto_schema(tags=['Import'], responses=task_create_response_scheme)
+    @swagger_auto_schema(
+        auto_schema=None,
+        operation_summary='Re-import tasks',
+        operation_description="""
+        Re-import tasks using the specified file upload IDs for a specific project.
+        """
+    )
     def post(self, *args, **kwargs):
         return super(ReImportAPI, self).post(*args, **kwargs)
 
 
+@method_decorator(name='get', decorator=swagger_auto_schema(
+        tags=['Import'],
+        operation_summary='Get files list',
+        operation_description="""
+        Retrieve the list of uploaded files used to create labeling tasks for a specific project.
+        """
+        ))
+@method_decorator(name='delete', decorator=swagger_auto_schema(
+        tags=['Import'],
+        operation_summary='Delete files',
+        operation_description="""
+        Delete uploaded files for a specific project.
+        """
+        ))
 class FileUploadListAPI(generics.mixins.ListModelMixin,
                         generics.mixins.DestroyModelMixin,
                         generics.GenericAPIView):
-    """
-    get:
-    Get files list
-
-    Retrieve the list of uploaded files used to create labeling tasks for a specific project.
-
-    delete:
-    Delete files
-
-    Delete uploaded files for a specific project.
-    """
-
     parser_classes = (JSONParser, MultiPartParser, FormParser)
-    permission_classes = (IsBusiness, )
     serializer_class = FileUploadSerializer
+    permission_required = ViewClassPermission(
+        GET=all_permissions.projects_view,
+        DELETE=all_permissions.projects_change,
+    )
     queryset = FileUpload.objects.all()
 
     def get_queryset(self):
-        project = get_object_with_permissions(self.request, Project, self.kwargs.get('pk', 0), 'projects.view_project')
+        project = generics.get_object_or_404(Project.objects.for_user(self.request.user), pk=self.kwargs.get('pk', 0))
         if project.is_draft:
             # If project is in draft state, we return all uploaded files, ignoring queried ids
             logger.debug(f'Return all uploaded files for draft project {project}')
@@ -416,13 +385,11 @@ class FileUploadListAPI(generics.mixins.ListModelMixin,
         logger.debug(f'File Upload IDs found: {ids}')
         return FileUpload.objects.filter(project_id=project.id, id__in=ids, user=self.request.user)
 
-    @swagger_auto_schema(tags=['Import'])
     def get(self, request, *args, **kwargs):
         return self.list(request, *args, **kwargs)
 
-    @swagger_auto_schema(tags=['Import'])
     def delete(self, request, *args, **kwargs):
-        project = get_object_with_permissions(self.request, Project, self.kwargs['pk'], 'projects.view_project')
+        project = generics.get_object_or_404(Project.objects.for_user(self.request.user),  pk=self.kwargs['pk'])
         ids = self.request.data.get('file_upload_ids')
         if ids is None:
             deleted, _ = FileUpload.objects.filter(project=project).delete()
@@ -433,24 +400,59 @@ class FileUploadListAPI(generics.mixins.ListModelMixin,
         return Response({'deleted': deleted}, status=status.HTTP_200_OK)
 
 
+@method_decorator(name='get', decorator=swagger_auto_schema(
+        tags=['Import'],
+        operation_summary='Get file upload',
+        operation_description='Retrieve details about a specific uploaded file.'
+    ))
+@method_decorator(name='patch', decorator=swagger_auto_schema(
+        tags=['Import'],
+        operation_summary='Update file upload',
+        operation_description='Update a specific uploaded file.',
+        request_body=FileUploadSerializer
+    ))
+@method_decorator(name='delete', decorator=swagger_auto_schema(
+        tags=['Import'],
+        operation_summary='Delete file upload',
+        operation_description='Delete a specific uploaded file.'))
 class FileUploadAPI(generics.RetrieveUpdateDestroyAPIView):
     parser_classes = (JSONParser, MultiPartParser, FormParser)
-    permission_classes = (IsBusiness, )
+    permission_classes = (IsAuthenticated, )
     serializer_class = FileUploadSerializer
     queryset = FileUpload.objects.all()
 
-    @swagger_auto_schema(tags=['Import'], operation_summary='Get file upload', operation_description='Retrieve details about a specific uploaded file.')
     def get(self, *args, **kwargs):
         return super(FileUploadAPI, self).get(*args, **kwargs)
 
-    @swagger_auto_schema(tags=['Import'], operation_summary='Update file upload', operation_description='Update a specific uploaded file.', request_body=FileUploadSerializer)
     def patch(self, *args, **kwargs):
         return super(FileUploadAPI, self).patch(*args, **kwargs)
 
-    @swagger_auto_schema(tags=['Import'], operation_summary='Delete file upload', operation_description='Delete a specific uploaded file.')
     def delete(self, *args, **kwargs):
         return super(FileUploadAPI, self).delete(*args, **kwargs)
 
     @swagger_auto_schema(auto_schema=None)
     def put(self, *args, **kwargs):
         return super(FileUploadAPI, self).put(*args, **kwargs)
+
+
+class UploadedFileResponse(generics.RetrieveAPIView):
+    permission_classes = (IsAuthenticated, )
+
+    @swagger_auto_schema(auto_schema=None)
+    def get(self, *args, **kwargs):
+        request = self.request
+        filename = kwargs['filename']
+        file = settings.UPLOAD_DIR + ('/' if not settings.UPLOAD_DIR.endswith('/') else '') + filename
+        logger.debug(f'Fetch uploaded file by user {request.user} => {file}')
+        file_upload = FileUpload.objects.filter(file=file).last()
+
+        if not file_upload.has_permission(request.user):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
+        file = file_upload.file
+        if file.storage.exists(file.name):
+            content_type, encoding = mimetypes.guess_type(str(file.name))
+            content_type = content_type or 'application/octet-stream'
+            return RangedFileResponse(request, file.open(mode='rb'), content_type=content_type)
+        else:
+            return Response(status=status.HTTP_404_NOT_FOUND)

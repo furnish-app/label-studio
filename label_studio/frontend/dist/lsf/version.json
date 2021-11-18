@@ -1,6 +1,6 @@
 {
-  "message": "Fix Text spans if label's missing for any reason",
-  "commit": "5164462ced2fe8a0bbdd7cd9c4a5bec3772577ab",
+  "message": "[fix] Linter issues",
+  "commit": "d0261d7362eaee235f6ab1f2d7f64ac17e7226c6",
   "branch": "master",
-  "date": "2021-03-31T10:57:00Z"
+  "date": "2021-10-26T12:28:02Z"
 }
