@@ -10,6 +10,9 @@ export POSTGRE_HOST="${BASH_REMATCH[3]}"
 export POSTGRE_PORT="${BASH_REMATCH[4]}"
 export DJANGO_DB='default'
 
+chmod 777 -R /usr/lib/python3/dist-packages/.wh.wheel-0.37.1.egg-info
+
+
 ./deploy/docker-entrypoint.sh label-studio \
   --host ${HOST:-""} \
   --port ${PORT} \
