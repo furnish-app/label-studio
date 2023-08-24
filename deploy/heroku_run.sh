@@ -10,6 +10,8 @@ export POSTGRE_HOST="${BASH_REMATCH[3]}"
 export POSTGRE_PORT="${BASH_REMATCH[4]}"
 export DJANGO_DB='default'
 
+echo "Test!!!"
+
 ./deploy/docker-entrypoint.sh label-studio \
   --host ${HOST:-""} \
   --port ${PORT} \
